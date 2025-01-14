@@ -6,6 +6,7 @@ import websockets
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.websockets import WebSocketDisconnect
+from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -48,17 +49,30 @@ async def index_page():
 async def handle_incoming_call(request: Request):
     """Handle incoming call and return media specific XML response to connect to Media Stream."""
     host = request.url.hostname
-    response = f"""
-                <?xml version="1.0" encoding="UTF-8"?>
+    response = f"""<?xml version="1.0" encoding="UTF-8"?>
                     <Response>
-                        <Say>Hi, you have called Bart's Automative Centre. How can we help?</Say>
+                        <Say>Connecting you now</Say>
                         <Connect>
                             <Stream url="wss://{host}/media-stream" />
                         </Connect>
                     </Response>
     """
-    
-    return HTMLResponse(content=str(response), media_type="application/xml")
+    return HTMLResponse(content=response, media_type="application/xml")
+
+# @app.api_route("/incoming-call", methods=["GET", "POST"])
+# async def handle_incoming_call(request: Request):
+#     """Handle incoming call and return TwiML response to connect to Media Stream."""
+#     response = VoiceResponse()
+#     # <Say> punctuation to improve text-to-speech flow
+#     response.say("Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open-A.I. Realtime API")
+#     response.pause(length=1)
+#     response.say("O.K. you can start talking!")
+#     host = request.url.hostname
+#     connect = Connect()
+#     connect.stream(url=f'wss://{host}/media-stream')
+#     response.append(connect)
+#     return HTMLResponse(content=str(response), media_type="application/xml")
+
 
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
@@ -68,7 +82,7 @@ async def handle_media_stream(websocket: WebSocket):
 
     async with websockets.connect(
         OPENAI_REALTIME_URL,
-        headers={
+        extra_headers={
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "OpenAI-Beta": "realtime=v1"
         }
