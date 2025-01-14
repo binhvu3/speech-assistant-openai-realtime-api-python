@@ -13,6 +13,7 @@ load_dotenv()
 # Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 PORT = int(os.getenv('PORT', 5050))
+OPENAI_REALTIME_URL='wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
 SYSTEM_MESSAGE = (
     """
     You are a helpful and bubbly AI assistant who loves to chat about
@@ -61,13 +62,13 @@ async def handle_incoming_call(request: Request):
 
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
-    """Handle WebSocket connections between Twilio and OpenAI."""
+    """Handle WebSocket connections between Communication Server and OpenAI."""
     print("Client connected")
     await websocket.accept()
 
     async with websockets.connect(
-        'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
-        extra_headers={
+        OPENAI_REALTIME_URL,
+        headers={
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "OpenAI-Beta": "realtime=v1"
         }
@@ -79,9 +80,9 @@ async def handle_media_stream(websocket: WebSocket):
         latest_media_timestamp = 0
         last_assistant_item = None
         mark_queue = []
-        response_start_timestamp_twilio = None
+        response_start_timestamp_comm_server = None
         
-        async def receive_from_twilio():
+        async def receive_from_comm_server():
             """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
             nonlocal stream_sid, latest_media_timestamp
             try:
@@ -97,7 +98,7 @@ async def handle_media_stream(websocket: WebSocket):
                     elif data['event'] == 'start':
                         stream_sid = data['start']['streamSid']
                         print(f"Incoming stream has started {stream_sid}")
-                        response_start_timestamp_twilio = None
+                        response_start_timestamp_comm_server = None
                         latest_media_timestamp = 0
                         last_assistant_item = None
                     elif data['event'] == 'mark':
@@ -108,14 +109,12 @@ async def handle_media_stream(websocket: WebSocket):
                 if openai_ws.open:
                     await openai_ws.close()
 
-        async def send_to_twilio():
-            """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
-            nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio
+        async def send_to_comm_server():
+            """Receive events from the OpenAI Realtime API, send audio back to Communication Server."""
+            nonlocal stream_sid, last_assistant_item, response_start_timestamp_comm_server
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
-                    if response['type'] in LOG_EVENT_TYPES:
-                        print(f"Received event: {response['type']}", response)
 
                     if response.get('type') == 'response.audio.delta' and 'delta' in response:
                         audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
@@ -128,10 +127,10 @@ async def handle_media_stream(websocket: WebSocket):
                         }
                         await websocket.send_json(audio_delta)
 
-                        if response_start_timestamp_twilio is None:
-                            response_start_timestamp_twilio = latest_media_timestamp
+                        if response_start_timestamp_comm_server is None:
+                            response_start_timestamp_comm_server = latest_media_timestamp
                             if SHOW_TIMING_MATH:
-                                print(f"Setting start timestamp for new response: {response_start_timestamp_twilio}ms")
+                                print(f"Setting start timestamp for new response: {response_start_timestamp_comm_server}ms")
 
                         # Update last_assistant_item safely
                         if response.get('item_id'):
@@ -146,16 +145,16 @@ async def handle_media_stream(websocket: WebSocket):
                             print(f"Interrupting response with id: {last_assistant_item}")
                             await handle_speech_started_event()
             except Exception as e:
-                print(f"Error in send_to_twilio: {e}")
+                print(f"Error in send_to_comm_server: {e}")
 
         async def handle_speech_started_event():
             """Handle interruption when the caller's speech starts."""
-            nonlocal response_start_timestamp_twilio, last_assistant_item
+            nonlocal response_start_timestamp_comm_server, last_assistant_item
             print("Handling speech started event.")
-            if mark_queue and response_start_timestamp_twilio is not None:
-                elapsed_time = latest_media_timestamp - response_start_timestamp_twilio
+            if mark_queue and response_start_timestamp_comm_server is not None:
+                elapsed_time = latest_media_timestamp - response_start_timestamp_comm_server
                 if SHOW_TIMING_MATH:
-                    print(f"Calculating elapsed time for truncation: {latest_media_timestamp} - {response_start_timestamp_twilio} = {elapsed_time}ms")
+                    print(f"Calculating elapsed time for truncation: {latest_media_timestamp} - {response_start_timestamp_comm_server} = {elapsed_time}ms")
 
                 if last_assistant_item:
                     if SHOW_TIMING_MATH:
@@ -176,7 +175,7 @@ async def handle_media_stream(websocket: WebSocket):
 
                 mark_queue.clear()
                 last_assistant_item = None
-                response_start_timestamp_twilio = None
+                response_start_timestamp_comm_server = None
 
         async def send_mark(connection, stream_sid):
             if stream_sid:
@@ -188,7 +187,7 @@ async def handle_media_stream(websocket: WebSocket):
                 await connection.send_json(mark_event)
                 mark_queue.append('responsePart')
 
-        await asyncio.gather(receive_from_twilio(), send_to_twilio())
+        await asyncio.gather(receive_from_comm_server(), send_to_comm_server())
 
 async def send_initial_conversation_item(openai_ws):
     """Send initial conversation item if AI talks first."""
@@ -200,7 +199,7 @@ async def send_initial_conversation_item(openai_ws):
             "content": [
                 {
                     "type": "input_text",
-                    "text": "Greet the user with 'Hello there! I am an AI voice assistant powered by Twilio and the OpenAI Realtime API. You can ask me for facts, jokes, or anything you can imagine. How can I help you?'"
+                    "text": "Greet the user with a random American name and ask them for their name"
                 }
             ]
         }
@@ -221,9 +220,11 @@ async def initialize_session(openai_ws):
             "instructions": SYSTEM_MESSAGE,
             "modalities": ["text", "audio"],
             "temperature": 0.8,
+            "input_audio_transcription": {
+                "model": "whisper-1"
+            }
         }
     }
-    print('Sending session update:', json.dumps(session_update))
     await openai_ws.send(json.dumps(session_update))
 
     # Uncomment the next line to have the AI speak first
