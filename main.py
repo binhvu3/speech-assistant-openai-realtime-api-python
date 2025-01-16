@@ -6,7 +6,6 @@ import websockets
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.websockets import WebSocketDisconnect
-from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,7 +13,7 @@ load_dotenv()
 # Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 PORT = int(os.getenv('PORT', 5050))
-OPENAI_REALTIME_URL='wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
+OPENAI_REALTIME_URL='wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-10-01'
 SYSTEM_MESSAGE = (
     """
     You are a helpful and bubbly AI assistant who loves to chat about
@@ -59,21 +58,6 @@ async def handle_incoming_call(request: Request):
     """
     return HTMLResponse(content=response, media_type="application/xml")
 
-# @app.api_route("/incoming-call", methods=["GET", "POST"])
-# async def handle_incoming_call(request: Request):
-#     """Handle incoming call and return TwiML response to connect to Media Stream."""
-#     response = VoiceResponse()
-#     # <Say> punctuation to improve text-to-speech flow
-#     response.say("Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open-A.I. Realtime API")
-#     response.pause(length=1)
-#     response.say("O.K. you can start talking!")
-#     host = request.url.hostname
-#     connect = Connect()
-#     connect.stream(url=f'wss://{host}/media-stream')
-#     response.append(connect)
-#     return HTMLResponse(content=str(response), media_type="application/xml")
-
-
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
     """Handle WebSocket connections between Communication Server and OpenAI."""
@@ -95,9 +79,10 @@ async def handle_media_stream(websocket: WebSocket):
         last_assistant_item = None
         mark_queue = []
         response_start_timestamp_comm_server = None
+        transcript = []
         
         async def receive_from_comm_server():
-            """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
+            """Receive audio data from Communication Server and send it to the OpenAI Realtime API."""
             nonlocal stream_sid, latest_media_timestamp
             try:
                 async for message in websocket.iter_text():
@@ -125,11 +110,16 @@ async def handle_media_stream(websocket: WebSocket):
 
         async def send_to_comm_server():
             """Receive events from the OpenAI Realtime API, send audio back to Communication Server."""
-            nonlocal stream_sid, last_assistant_item, response_start_timestamp_comm_server
+            nonlocal stream_sid, last_assistant_item, response_start_timestamp_comm_server, transcript
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
 
+                        # Get input transcipt
+                    if response.get('transcript'):
+                        transcript.append(response['transcript'])
+                        print(f"Transcript: {response['transcript']}")
+                    
                     if response.get('type') == 'response.audio.delta' and 'delta' in response:
                         audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
                         audio_delta = {
@@ -151,6 +141,7 @@ async def handle_media_stream(websocket: WebSocket):
                             last_assistant_item = response['item_id']
 
                         await send_mark(websocket, stream_sid)
+
 
                     # Trigger an interruption. Your use case might work better using `input_audio_buffer.speech_stopped`, or combining the two.
                     if response.get('type') == 'input_audio_buffer.speech_started':
@@ -242,7 +233,7 @@ async def initialize_session(openai_ws):
     await openai_ws.send(json.dumps(session_update))
 
     # Uncomment the next line to have the AI speak first
-    # await send_initial_conversation_item(openai_ws)
+    await send_initial_conversation_item(openai_ws)
 
 if __name__ == "__main__":
     import uvicorn
